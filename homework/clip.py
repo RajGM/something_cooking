@@ -115,7 +115,7 @@ class CaptionDatasetForTraining(Dataset):
 
 class CLIP(nn.Module):
     def __init__(
-        self, vision_encoder: nn.Module, text_encoder: nn.Module, proj_dim: int = 64, temperature: float = 0.07
+        self, vision_encoder: nn.Module, text_encoder: nn.Module, proj_dim: int = 256, temperature: float = 0.07
     ):
         super().__init__()
         self.vision_encoder = vision_encoder
@@ -319,7 +319,7 @@ def train(
     data_dir: Path | None = None,
     train_dataset_name: str = "train",
     output_dir: str = "clip",
-    num_train_epochs: float = 6,  # for debugging purpose, increase this once the dry run works
+    num_train_epochs: float = 15,  # for debugging purpose, increase this once the dry run works
     per_device_train_batch_size: int = 132,
     gradient_accumulation_steps: int = 4,
     learning_rate: float = 5e-4,
@@ -385,21 +385,33 @@ def train(
     train_dataset = CaptionDatasetForTraining(train_dataset, processor)
 
     training_args = TrainingArguments(
-        output_dir=output_dir,
-        logging_dir=output_dir,
-        report_to="tensorboard",
-        num_train_epochs=num_train_epochs,
-        per_device_train_batch_size=per_device_train_batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        gradient_checkpointing=True,
-        learning_rate=learning_rate,
-        bf16=True if device == "cuda" else False,
-        logging_steps=1,
-        save_strategy="steps",
-        save_steps=50,
-        save_total_limit=2,
-        label_names=["labels"],
-        dataloader_num_workers=num_workers,
+    output_dir=output_dir,
+    logging_dir=output_dir,
+    report_to="tensorboard",
+
+    num_train_epochs=num_train_epochs,
+    per_device_train_batch_size=per_device_train_batch_size,
+    gradient_accumulation_steps=gradient_accumulation_steps,
+
+    gradient_checkpointing=True,
+    learning_rate=learning_rate,
+
+    bf16=True if device == "cuda" else False,
+
+    # ---- Improved stability & speed ----
+    lr_scheduler_type="cosine",
+    warmup_steps=1000,
+    max_grad_norm=1.0,
+
+    # ---- Logging / Checkpoints ----
+    logging_steps=50,
+    save_strategy="steps",
+    save_steps=1000,          # was 50 → too frequent, slows down training
+    save_total_limit=2,
+
+    # ---- Dataset / DataLoader ----
+    label_names=["labels"],
+    dataloader_num_workers=num_workers,
     )
 
     trainer = Trainer(
@@ -426,11 +438,11 @@ def demo_train():
     train(
         train_dataset_name="train_demo",
         output_dir="demo_clip",
-        num_train_epochs=10,
+        num_train_epochs=20,
         per_device_train_batch_size=64,
         num_workers=1,
         gradient_accumulation_steps=1,
-        learning_rate=5e-4,
+        learning_rate=2e-4,
     )
 
 
