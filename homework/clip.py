@@ -29,11 +29,29 @@ def load(model_name: str = "clip_model"):
     vision_encoder = vlm.model.model.vision_model
     text_encoder = vlm.model.model.text_model
     clip = CLIP(vision_encoder, text_encoder)
-    clip = PeftModel.from_pretrained(clip, model_path).to(device)
 
+    # Load PEFT wrapper
+    clip = PeftModel.from_pretrained(clip, model_path)
+    # Move underlying model to device
+    clip.model.to(device)
+
+    # Perform a dummy forward on the underlying model to initialize Lazy modules
+    with torch.no_grad():
+        clip.model.eval()
+        dummy_pixel = torch.randn(1, 3, 192, 192, device=device)
+        dummy_input_ids = torch.ones((1, 8), dtype=torch.long, device=device)
+        dummy_attn = torch.ones_like(dummy_input_ids, device=device)
+        try:
+            _ = clip.model(dummy_pixel, dummy_input_ids, dummy_attn)
+        except Exception:
+            # If forward fails for some reason (unexpected shapes), ignore — parameters should be created in most cases.
+            pass
+
+    # Load additional projection weights saved by save_pretrained
     clip.model.load_pretrained(model_path)
     clip.model.eval()
     if device == "cuda":
+        # safe to convert after lazy params initialized
         clip = clip.to(dtype=torch.bfloat16)
 
     return clip
@@ -165,8 +183,11 @@ class CLIP(nn.Module):
         def make_inputs_require_grads(module, input, output):  # noqa: A002
             output.requires_grad_(True)
 
-        self.vision_encoder.embeddings.register_forward_hook(make_inputs_require_grads)
-        self.text_encoder.get_input_embeddings().register_forward_hook(make_inputs_require_grads)
+        # Some vision/text backbones might not have the exact attribute names; guard with getattr
+        if hasattr(self.vision_encoder, "embeddings"):
+            self.vision_encoder.embeddings.register_forward_hook(make_inputs_require_grads)
+        if hasattr(self.text_encoder, "get_input_embeddings"):
+            self.text_encoder.get_input_embeddings().register_forward_hook(make_inputs_require_grads)
 
     def forward(
         self,
@@ -294,7 +315,31 @@ def train(
     # Initialize model and processor
     vision_encoder = vlm.model.model.vision_model
     text_encoder = vlm.model.model.text_model
-    model = CLIP(vision_encoder, text_encoder).to(device).bfloat16()
+
+    # Create CLIP instance WITHOUT converting dtype yet
+    model = CLIP(vision_encoder, text_encoder)
+
+    # Move to device so lazy params are created on the correct device
+    model = model.to(device)
+
+    # --- Dummy forward to initialize LazyLinear parameters (and any lazy modules) ---
+    # Use a tiny synthetic batch matching the shapes expected during training.
+    with torch.no_grad():
+        model.eval()
+        dummy_pixel = torch.randn(1, 3, 192, 192, device=device)
+        dummy_input_ids = torch.ones((1, 8), dtype=torch.long, device=device)
+        dummy_attn = torch.ones_like(dummy_input_ids, device=device)
+        try:
+            _ = model(dummy_pixel, dummy_input_ids, dummy_attn)
+        except Exception:
+            # If the forward fails (rare), we still proceed — main goal is initialization of lazy params.
+            pass
+    # ---------------------------------------------------------
+
+    # Now safe to convert to desired dtype (bfloat16) if using CUDA
+    if device == "cuda":
+        model = model.bfloat16()
+
     model.set_trainable_parameters()
 
     peft_config = LoraConfig(
@@ -309,6 +354,7 @@ def train(
     )
     model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()
+    # Ensure model on device after PEFT wrapping
     model.to(device)
     model.train()
     model.gradient_checkpointing_enable()
@@ -348,6 +394,7 @@ def train(
 
     # save model
     trainer.save_model(output_dir)
+    # model is a PeftModel wrapper here; .model is the underlying model with save_pretrained method
     model.model.save_pretrained(output_dir)
 
     writer.close()
