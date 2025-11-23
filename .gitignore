@@ -1,0 +1,22 @@
+# Ignore the dataset
+data/train/
+data/valid/
+data/valid_grader/
+data/test/
+
+# Ignore any saved checkpoints
+homework/vlm_sft/
+homework/clip/
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+
+# Ignore editor crap
+.vscode/
+.idea/
+.DS_Store
+
+# Ignore environment files
+.venv/
+env/
