@@ -111,14 +111,14 @@ def train(
     data_dir: Path | None = None,
     train_dataset_name: str = "train",
     output_dir: str = "vlm_sft",
-    num_train_epochs: int = 0.05,  # use only 0.05 epoch for training
+    num_train_epochs: int = 5,  # use only 0.05 epoch for training
     per_device_train_batch_size: int = 8,
     gradient_accumulation_steps: int = 4,
-    learning_rate: float = 5e-4,
+    learning_rate: float = 3e-4,
     lora_r: int = 8,
     lora_alpha: int = 32,
     lora_dropout: float = 0.0,
-    num_workers: int = 16,
+    num_workers: int = 8,
 ):
     """
     Fine-tune a VLM model using LoRA.
@@ -188,7 +188,7 @@ def train(
         bf16=True if DEVICE == "cuda" else False,
         logging_steps=1,
         save_strategy="steps",
-        save_steps=50,
+        save_steps=1000,
         save_total_limit=2,
         label_names=["labels"],
         dataloader_num_workers=num_workers,
