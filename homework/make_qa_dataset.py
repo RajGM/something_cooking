@@ -20,7 +20,7 @@ def main():
             qa_pairs = generate_qa_pairs(str(info_file), view)
             for qa in qa_pairs:
                 all_items.append({
-                    "image_file": str(image_path),
+                    "image_file": f"train/{image_path.name}",
                     "question": qa["question"],
                     "answer": qa["answer"]
                 })

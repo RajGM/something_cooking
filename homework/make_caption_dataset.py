@@ -19,7 +19,7 @@ def main():
             captions = generate_caption(str(info_file), view)
             for cap in captions:
                 all_items.append({
-                    "image_file": str(image_path),
+                    "image_file": f"train/{image_path.name}",
                     "caption": cap,
                 })
 
