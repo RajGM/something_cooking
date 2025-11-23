@@ -28,6 +28,7 @@ def load(model_name: str = "clip_model"):
     vlm = BaseVLM()
     vision_encoder = vlm.model.model.vision_model
     text_encoder = vlm.model.model.text_model
+
     clip = CLIP(vision_encoder, text_encoder)
 
     # Load PEFT wrapper
@@ -35,7 +36,7 @@ def load(model_name: str = "clip_model"):
     # Move underlying model to device
     clip.model.to(device)
 
-    # Perform a dummy forward on the underlying model to initialize Lazy modules
+    # If there are any Lazy modules left, initialize them by doing a dummy forward
     with torch.no_grad():
         clip.model.eval()
         dummy_pixel = torch.randn(1, 3, 192, 192, device=device)
@@ -44,14 +45,14 @@ def load(model_name: str = "clip_model"):
         try:
             _ = clip.model(dummy_pixel, dummy_input_ids, dummy_attn)
         except Exception:
-            # If forward fails for some reason (unexpected shapes), ignore — parameters should be created in most cases.
+            # ignore forward errors here (we just want lazy init if possible)
             pass
 
-    # Load additional projection weights saved by save_pretrained
+    # Load extra projection weights if present
     clip.model.load_pretrained(model_path)
     clip.model.eval()
     if device == "cuda":
-        # safe to convert after lazy params initialized
+        # safe to convert after lazy params (if any) were (attempted) to be initialized
         clip = clip.to(dtype=torch.bfloat16)
 
     return clip
@@ -120,10 +121,34 @@ class CLIP(nn.Module):
         self.vision_encoder = vision_encoder
         self.text_encoder = text_encoder
 
-        # Projection layers to a shared embedding space; lazy so we don't need
-        # to know the encoder hidden size ahead of time.
-        self.vision_proj = nn.LazyLinear(proj_dim, bias=False)
-        self.text_proj = nn.LazyLinear(proj_dim, bias=False)
+        # Try to read hidden sizes from encoder configs to avoid LazyLinear.
+        v_hidden = None
+        t_hidden = None
+        try:
+            v_cfg = getattr(self.vision_encoder, "config", None)
+            t_cfg = getattr(self.text_encoder, "config", None)
+            if v_cfg is not None:
+                v_hidden = getattr(v_cfg, "hidden_size", None) or (
+                    getattr(v_cfg, "hidden_sizes", None)[-1] if getattr(v_cfg, "hidden_sizes", None) else None
+                )
+            if t_cfg is not None:
+                t_hidden = getattr(t_cfg, "hidden_size", None) or (
+                    getattr(t_cfg, "hidden_sizes", None)[-1] if getattr(t_cfg, "hidden_sizes", None) else None
+                )
+        except Exception:
+            v_hidden = None
+            t_hidden = None
+
+        # If we have the hidden sizes, create explicit Linear layers. Otherwise fall back to LazyLinear.
+        if v_hidden is not None and t_hidden is not None:
+            self.vision_proj = nn.Linear(v_hidden, proj_dim, bias=False)
+            self.text_proj = nn.Linear(t_hidden, proj_dim, bias=False)
+            self._used_lazy = False
+        else:
+            # LazyLinear as a fallback; we'll ensure initialization before dtype conversion / training.
+            self.vision_proj = nn.LazyLinear(proj_dim, bias=False)
+            self.text_proj = nn.LazyLinear(proj_dim, bias=False)
+            self._used_lazy = True
 
         # Learnable logit scale as in CLIP: logits = exp(logit_scale) * cos_sim
         self.logit_scale = nn.Parameter(torch.log(torch.tensor(1.0 / temperature)))
@@ -183,7 +208,6 @@ class CLIP(nn.Module):
         def make_inputs_require_grads(module, input, output):  # noqa: A002
             output.requires_grad_(True)
 
-        # Some vision/text backbones might not have the exact attribute names; guard with getattr
         if hasattr(self.vision_encoder, "embeddings"):
             self.vision_encoder.embeddings.register_forward_hook(make_inputs_require_grads)
         if hasattr(self.text_encoder, "get_input_embeddings"):
@@ -281,7 +305,6 @@ def compute_clip_loss(
 def get_target_modules_for_lora(model: nn.Module) -> list[str]:
     target_modules = []
     for name, module in model.named_modules():
-        # if isinstance(module, nn.Linear) and ("vision_encoder" in name and "projection" not in name):
         if (
             isinstance(module, nn.Linear)
             and ("vision_encoder" in name or "text_encoder" in name)
@@ -319,24 +342,23 @@ def train(
     # Create CLIP instance WITHOUT converting dtype yet
     model = CLIP(vision_encoder, text_encoder)
 
-    # Move to device so lazy params are created on the correct device
+    # Move to device so that any parameter creation happens on correct device
     model = model.to(device)
 
-    # --- Dummy forward to initialize LazyLinear parameters (and any lazy modules) ---
-    # Use a tiny synthetic batch matching the shapes expected during training.
-    with torch.no_grad():
-        model.eval()
-        dummy_pixel = torch.randn(1, 3, 192, 192, device=device)
-        dummy_input_ids = torch.ones((1, 8), dtype=torch.long, device=device)
-        dummy_attn = torch.ones_like(dummy_input_ids, device=device)
-        try:
-            _ = model(dummy_pixel, dummy_input_ids, dummy_attn)
-        except Exception:
-            # If the forward fails (rare), we still proceed — main goal is initialization of lazy params.
-            pass
-    # ---------------------------------------------------------
+    # If LazyLinear was used (fallback), initialize by a dummy forward before converting dtype
+    if getattr(model, "_used_lazy", False):
+        with torch.no_grad():
+            model.eval()
+            dummy_pixel = torch.randn(1, 3, 192, 192, device=device)
+            dummy_input_ids = torch.ones((1, 8), dtype=torch.long, device=device)
+            dummy_attn = torch.ones_like(dummy_input_ids, device=device)
+            try:
+                _ = model(dummy_pixel, dummy_input_ids, dummy_attn)
+            except Exception:
+                # If the forward fails, continue — conversion might still fail but user will get a clear error.
+                pass
 
-    # Now safe to convert to desired dtype (bfloat16) if using CUDA
+    # Now safe to convert to bfloat16 if using CUDA and parameters are initialized
     if device == "cuda":
         model = model.bfloat16()
 
@@ -348,13 +370,11 @@ def train(
         r=8,
         lora_alpha=32,
         lora_dropout=0.0,
-        # target_modules="all-linear",
         target_modules=get_target_modules_for_lora(model),
         bias="none",
     )
     model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()
-    # Ensure model on device after PEFT wrapping
     model.to(device)
     model.train()
     model.gradient_checkpointing_enable()
