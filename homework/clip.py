@@ -319,7 +319,7 @@ def train(
     data_dir: Path | None = None,
     train_dataset_name: str = "train",
     output_dir: str = "clip",
-    num_train_epochs: float = 2,  # for debugging purpose, increase this once the dry run works
+    num_train_epochs: float = 6,  # for debugging purpose, increase this once the dry run works
     per_device_train_batch_size: int = 132,
     gradient_accumulation_steps: int = 4,
     learning_rate: float = 5e-4,
