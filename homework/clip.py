@@ -438,11 +438,11 @@ def demo_train():
     train(
         train_dataset_name="train_demo",
         output_dir="demo_clip",
-        num_train_epochs=20,
+        num_train_epochs=12,
         per_device_train_batch_size=64,
-        num_workers=1,
+        num_workers=6,
         gradient_accumulation_steps=1,
-        learning_rate=2e-4,
+        learning_rate=4e-4,
     )
 
 
